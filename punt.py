@@ -15,6 +15,7 @@ if len(sys.argv) != 3:
 
 security = 128 # symmetric-key equivalent
 paranoid = True # bail out if too much randomness is requested
+verbose = False # don't be noisy
 bit_count = 0L # generator starts out unused
 bit_count_limit = int(2**16 * 1.7) # maximum number of bits we can produce before we have to bail out
 cache = 0L # generator hasn't produced any randomness
@@ -64,7 +65,7 @@ if response != 'YES':
 print >>sys.stderr
 print >>sys.stderr, "Randomizing... ",
 
-random = BlumBlumShubRandom.from_state((security, paranoid, bit_count,
+random = BlumBlumShubRandom.from_state((security, paranoid, verbose, bit_count,
                                         bit_count_limit, cache, cache_len,
                                         modulus_length, bits_per_iteration,
                                         modulus, state, skip_modulus))

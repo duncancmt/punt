@@ -7,22 +7,27 @@ import operator
 import math
 import struct
 import cPickle
+import sys
+from copy import deepcopy
 from fractions import gcd
 from numbers import Integral
 from itertools import *
 
-import primes
+from primes import mr_test
 from memoize import memoize
 from correct_random import CorrectRandom
 
 try:
     from gmpy2 import mpz
+    mpz_type = type(mpz())
     has_gmpy = True
 except ImportError:
     try:
         from gmpy import mpz
+        mpz_type = type(mpz())
         has_gmpy = True
     except ImportError:
+        mpz_type = Integral
         has_gmpy = False
 
 random = CorrectRandom()
@@ -34,7 +39,7 @@ def lcm(a,b):
     
 class BlumBlumShubRandom(CorrectRandom):
     def __init__(self, security, bits_to_supply=2**20, tolerance=0.5,
-                 seed=None, paranoid=True, _state=None):
+                 seed=None, paranoid=True, verbose=False, _state=None):
         """
         Arguments:
             security: The log (base 2) of the number of operations required to distinguish BBS output from random noise.
@@ -49,12 +54,18 @@ class BlumBlumShubRandom(CorrectRandom):
         else:
             self.security = security
             self.paranoid = paranoid
+            self.verbose = verbose
             self._bit_count = 0L
             self._bit_count_limit = bits_to_supply
             self._cache = 0L
             self._cache_len = 0L
-            
+
+            if self.verbose:
+                print "Picking optimal BBS parameters for security=%d, bits_to_supply=%d, tolerance=%g" \
+                      % (security, bits_to_supply, tolerance)
             (self._modulus_length, self._bits_per_iteration) = self.optimal_parameters(self.security, self._bit_count_limit, tolerance)
+            if self.verbose:
+                print "Got parameters n=%d, j=%d" % (self._modulus_length, self._bits_per_iteration)
             self.seed(seed)
 
     @classmethod
@@ -70,16 +81,24 @@ class BlumBlumShubRandom(CorrectRandom):
             raise RuntimeError("Too many bits supplied. Security guarantees invalidated.")
         
         iterations = max(int(math.ceil((1.0*n-self._cache_len) / self._bits_per_iteration)),0)
+        if self.verbose:
+            print 'Running %d iterations of BBS to get %d bits' % (iterations, n)
 
         mask = 2**self._bits_per_iteration - 1
         for i in xrange(iterations):
             self._cache |= (self.state & mask) << self._cache_len
             self._cache_len += self._bits_per_iteration
             self.state = pow(self.state, 2, self.modulus)
+            if self.verbose:
+                print 'Got new state %d' % self.state
 
         result = self._cache & ((1<<n) - 1)
         self._cache >>= n
         self._cache_len -= n
+        if self.verbose:
+            print 'result: %d' % result
+            print '_cache: %d' % self._cache
+            print '_cache_len: %d' % self._cache_len
         return result
 
     def seed(self, seed=None, regenerate_modulus=True):
@@ -95,20 +114,40 @@ class BlumBlumShubRandom(CorrectRandom):
         seed_bits = 2*self.security if regenerate_modulus else self.security
         # python random.SystemRandom() is unsuitable because it uses /dev/urandom
         if seed is None:
+            if self.verbose:
+                print 'Seed not supplied, getting %d bytes from /dev/random' % (seed_bits / 8),
+                sys.stdout.flush()
             seed = 0L
-            with open('/dev/random','r') as randfile:
+            with open('/dev/random','rb') as randfile:
                 for i in xrange(int(math.ceil(seed_bits / 8.0))):
                     seed |= struct.unpack('B', randfile.read(1))[0] << i*8
+                    if self.verbose:
+                        print '.',
+                        sys.stdout.flush()
+            if self.verbose:
+                print
 
-        assert isinstance(seed, Integral)
+        assert isinstance(seed, (Integral, mpz_type))
         self.state = x_0 = seed & (2**self.security - 1)
 
         if regenerate_modulus:
             random.seed(seed >> self.security)
+            if self.verbose:
+                print 'Choosing first prime...',
+                sys.stdout.flush()
+            # TODO: use a real random
             p = self.gen_special_prime(int(math.floor(self._modulus_length / 2.0 + 1)),
                                        certainty=self.security, random=random)
+            if self.verbose:
+                print 'p=%d' % p
+                print 'Choosing second prime...',
+                sys.stdout.flush()
+            # TODO: use a real random
             q = self.gen_special_prime(int(math.ceil(self._modulus_length / 2.0)),
                                        certainty=self.security, random=random)
+            if self.verbose:
+                print 'q=%d' % q
+                sys.stdout.flush()
             random.seed()
 
             assert p != q
@@ -120,11 +159,15 @@ class BlumBlumShubRandom(CorrectRandom):
 
         if has_gmpy:
             self.modulus = mpz(self.modulus)
-            self.skip_modulus = mpz(self.skip_modulus)
             self.state = mpz(self.state)
+            if self.skip_modulus is not None:
+                self.skip_modulus = mpz(self.skip_modulus)
+
 
         # degeneracy test as described by
         # http://www.ciphersbyritter.com/NEWS6/BBS.HTM
+        if self.verbose:
+            print 'Running degeneracy test'
         self.jumpahead(1)
         assert self.state > 0
         x_1 = self.state
@@ -133,20 +176,25 @@ class BlumBlumShubRandom(CorrectRandom):
         assert x_0 != x_1 and x_1 != x_2 and x_2 != x_0, \
                "Given parameters resulted in a degenerate cycle. Choose another initial state."
 
+    def reseed(self, seed):
+        if not isinstance(seed, Integral):
+            raise TypeError('Argument seed must be an integer')
+        self.seed((seed ^ self.state) % self.modulus, regenerate_modulus=False)
+
     def getstate(self):
-        return (self.security, self.paranoid,
-                self._bit_count, self._bit_count_limit,
-                self._cache, self._cache_len,
-                self._modulus_length, self._bits_per_iteration,
-                int(self.modulus), int(self.state),
-                int(self.skip_modulus) if self.skip_modulus is not None else None)
+        return deepcopy((self.security, self.paranoid, self.verbose,
+                         self._bit_count, self._bit_count_limit,
+                         self._cache, self._cache_len,
+                         self._modulus_length, self._bits_per_iteration,
+                         int(self.modulus), int(self.state),
+                         int(self.skip_modulus) if self.skip_modulus is not None else None))
 
     def setstate(self, state):
-        (self.security, self.paranoid,
+        (self.security, self.paranoid, self.verbose,
          self._bit_count, self._bit_count_limit,
          self._cache, self._cache_len,
          self._modulus_length, self._bits_per_iteration,
-         self.modulus, self.state, self.skip_modulus) = state
+         self.modulus, self.state, self.skip_modulus) = deepcopy(state)
 
         if has_gmpy:
             self.modulus = mpz(self.modulus)
@@ -155,11 +203,19 @@ class BlumBlumShubRandom(CorrectRandom):
                 self.skip_modulus = mpz(self.skip_modulus)
 
     def jumpahead(self, n):
+        if self.verbose:
+            print 'Jumping ahead %d states' % n
         if self.skip_modulus is not None:
             self.state = pow(self.state, pow(2, n, self.skip_modulus), self.modulus)
+            if self.verbose:
+                print 'New state %d' % self.state
         else:
+            if self.verbose:
+                print 'Jumping ahead without the skip modulus'
             for _ in xrange(n):
                 self.state = pow(self.state, 2, self.modulus)
+                if self.verbose:
+                    print 'New state %d' % self.state
         self._cache = 0L
         self._cache_len = 0L
 
@@ -194,14 +250,14 @@ class BlumBlumShubRandom(CorrectRandom):
             p1 = p2 * 2 + 1
             p = p1 * 2 + 1
             # first run a few abbreviated Miller-Rabin tests to fail quickly
-            if primes.mr_test(p2, rounds=1) \
-                   and primes.mr_test(p1, rounds=1) \
-                   and primes.mr_test(p, rounds=1):
-                if primes.mr_test(p2, certainty=certainty):
+            if mr_test(p2, rounds=1) \
+                   and mr_test(p1, rounds=1) \
+                   and mr_test(p, rounds=1):
+                if mr_test(p2, certainty=certainty):
                     p2_pass += 1
-                    if primes.mr_test(p1, certainty=certainty):
+                    if mr_test(p1, certainty=certainty):
                         p1_pass += 1
-                        if primes.mr_test(p, certainty=certainty):
+                        if mr_test(p, certainty=certainty):
                             break
         callback(loops, p2_pass, p1_pass, True)
         return p
@@ -331,7 +387,7 @@ class Shower(object):
         assert (1 << mod_bits) < reduce(operator.mul, primes[:index+1])
         self.index = index = int(round(index))
         self.modulus = m
-        self.residues = [ (n, self._allowed_residues(n), ((m*pow(m/n,n-2,n))/n) % m) for n in primes[:index] ]
+        self.residues = [ (n, self._allowed_residues(n), ((m*pow(m//n,n-2,n))//n) % m) for n in primes[:index] ]
         num_residues = reduce(operator.mul, map(len, map(operator.itemgetter(1), self.residues)))
         try:
             self.advantage = float(num_residues) / self.modulus
