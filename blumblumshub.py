@@ -179,7 +179,7 @@ class BlumBlumShubRandom(CorrectRandom):
     def reseed(self, seed):
         if not isinstance(seed, Integral):
             raise TypeError('Argument seed must be an integer')
-        self.seed((seed ^ self.state) % self.modulus, regenerate_modulus=False)
+        self.seed(seed * self.state % self.modulus, regenerate_modulus=False)
 
     def getstate(self):
         return deepcopy((self.security, self.paranoid, self.verbose,
