@@ -101,7 +101,7 @@ class BlumBlumShubRandom(CorrectRandom):
             print '_cache_len: %d' % self._cache_len
         return result
 
-    def seed(self, seed=None, regenerate_modulus=True):
+    def seed(self, seed=None, regenerate_modulus=True, random=random):
         """Keep the same security parameters, but reinitialize the state of this instance.
 
         seed: (optional) a number that deterministically initializes the state
@@ -109,7 +109,13 @@ class BlumBlumShubRandom(CorrectRandom):
             regenerate_modulus is True, the default is to reinitialize from
             /dev/random
         regenerate_modulus: (optional) if true, pick new primes for the modulus,
-            otherwise reuse the existing modulus
+            if false reuse the existing modulus (default True)
+        random: (optional) a random implementation used to stretch the seed when
+            regenerating the modulus. Should be a CSPRNG. Will be seeded
+            and iterated by this function. If multithreaded, should not
+            be used in any other thread.
+            (default python's builtin random, which is unsuitable for
+            cryptographic purposes, so you *MUST* override this argument)
         """
         seed_bits = 2*self.security if regenerate_modulus else self.security
         # python random.SystemRandom() is unsuitable because it uses /dev/urandom
@@ -131,18 +137,20 @@ class BlumBlumShubRandom(CorrectRandom):
         self.state = x_0 = seed & (2**self.security - 1)
 
         if regenerate_modulus:
+            import random as builtin_random
+            if random is builtin_random or isinstance(random, builtin_random.Random):
+                import warnings
+                warnings.warn('Python\'s builtin random is completely unsuitable for cryptographic purposes. For any sort of reasonable security, you *MUST* use a CSPRNG as the argument to BlumBlumShubRandom.seed')
             random.seed(seed >> self.security)
             if self.verbose:
                 print 'Choosing first prime...',
                 sys.stdout.flush()
-            # TODO: use a real random
             p = self.gen_special_prime(int(math.floor(self._modulus_length / 2.0 + 1)),
                                        certainty=self.security, random=random)
             if self.verbose:
                 print 'p=%d' % p
                 print 'Choosing second prime...',
                 sys.stdout.flush()
-            # TODO: use a real random
             q = self.gen_special_prime(int(math.ceil(self._modulus_length / 2.0)),
                                        certainty=self.security, random=random)
             if self.verbose:
@@ -154,6 +162,7 @@ class BlumBlumShubRandom(CorrectRandom):
             self.modulus = p*q
             self.skip_modulus = lcm(p-1, q-1) # TODO: it probably isn't safe to keep this around
 
+        self._bit_count = 0L
         self._cache = 0L
         self._cache_len = 0L
 
@@ -339,16 +348,13 @@ class BlumBlumShubRandom(CorrectRandom):
             while upper > lower:
                 j = (upper + lower)/2
                 j = j.to_integral_value(decimal.ROUND_FLOOR)
-                work = work_per_bit(j)
-                if work_per_bit(j-1) < work:
+                if work_per_bit(j-1) < work_per_bit(j):
                     upper = j
-                elif work_per_bit(j+1) < work:
-                    if lower == j:
-                        # because of the floor, we can get stuck here
-                        break
-                    lower = j
-                else:
+                elif lower == j:
+                    # because of the floor, we can get stuck here
                     break
+                else:
+                    lower = j
 
             n = find_n(j)
             assert 2**log_Ta <= attack_difficulty(n, j)
